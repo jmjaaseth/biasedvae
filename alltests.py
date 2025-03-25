@@ -6,7 +6,7 @@ from torchvision import datasets, transforms
 from sklearn.mixture import GaussianMixture
 import numpy as np
 from autoencoder import Autoencoder
-from stats import plot_histogram, plot_qq, plot_latent_space_2d, sample_and_visualize
+from stats import plot_histogram, plot_qq, plot_latent_space_2d, sample_and_visualize, ensure_image_path
 from constants import *
 import os
 from tqdm import tqdm
@@ -185,6 +185,8 @@ def train_base(model, train_loader, val_loader, epochs=EPOCHS):
                 break
         
         scheduler.step(val_loss)
+    
+    return model
 
 def train_goal(base_model, train_loader, val_loader, goal_latents):
     vae_GA = Autoencoder().to(DEVICE)
@@ -270,14 +272,15 @@ def fit_gmm_to_latents(latents, n_components=5):
     return gmm
 
 def gmm_log_likelihood(z, gmm):
-    """Compute log likelihood of samples under the GMM"""
-    z_np = z.detach().cpu().numpy()
-    # Check for invalid values
-    if np.isnan(z_np).any() or np.isinf(z_np).any():
-        return torch.tensor(float('-inf'), device=z.device)
+    """Compute log likelihood of samples under the GMM prior"""
+    # Reshape z to 2D if needed (batch_size, n_samples, latent_dim) -> (batch_size * n_samples, latent_dim)
+    if len(z.shape) == 3:
+        z = z.reshape(-1, z.shape[-1])
+    
     # Clip values to prevent overflow
-    z_np = np.clip(z_np, -1e6, 1e6)
-    log_prob = torch.from_numpy(gmm.score_samples(z_np)).to(z.device)
+    z = np.clip(z, -1e6, 1e6)
+    # Compute log probability under the GMM prior
+    log_prob = torch.from_numpy(gmm.score_samples(z)).to(DEVICE)
     return torch.clamp(log_prob, min=-1e6, max=1e6)  # Clip log probabilities
 
 def train_gmm_vae(base_model, train_loader, val_loader, goal_latents):
@@ -288,26 +291,45 @@ def train_gmm_vae(base_model, train_loader, val_loader, goal_latents):
     vae_GMM = Autoencoder().to(DEVICE)
     vae_GMM.load_state_dict(base_model.state_dict())
     
-    # Fit GMM to goal latents
+    # Fit GMM to goal latents to get the prior distribution
     gmm = fit_gmm_to_latents(goal_latents, n_components=GMM_N_COMPONENTS)
     
     def gmm_kl_divergence(mu, logvar):
+        """
+        Compute KL divergence between variational posterior q(z|x) and GMM prior p(z)
+        KL(q(z|x) || p(z)) = E_q[log q(z|x) - log p(z)]
+        where p(z) is the GMM prior
+        """
         # Clip values for numerical stability
         logvar = torch.clamp(logvar, min=-20, max=2)
         var = torch.exp(logvar)
         
-        # Compute GMM log likelihood for each sample
+        # Compute Monte Carlo estimate of the KL divergence
+        n_samples = 100  # Number of Monte Carlo samples
         z_samples = []
-        for _ in range(100):  # Monte Carlo samples
+        for _ in range(n_samples):
+            # Sample from q(z|x)
             z = mu + torch.randn_like(mu) * torch.sqrt(var)
             z_samples.append(z)
         
-        z_samples = torch.stack(z_samples)
-        log_likelihood = gmm_log_likelihood(z_samples.cpu().numpy(), gmm)
+        z_samples = torch.stack(z_samples)  # Shape: (n_samples, batch_size, latent_dim)
         
-        # Compute KL divergence
-        kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - var, dim=1)
-        return kl - torch.tensor(log_likelihood, device=DEVICE)
+        # Compute log q(z|x) for each sample
+        log_q = -0.5 * torch.sum(
+            logvar + (z_samples - mu).pow(2) / var + torch.log(torch.tensor(2 * np.pi, device=DEVICE)),
+            dim=-1
+        )
+        
+        # Compute log p(z) using the GMM prior
+        log_p = gmm_log_likelihood(z_samples.detach().cpu().numpy(), gmm)
+        
+        # Reshape log_p to match log_q shape
+        log_p = log_p.reshape(n_samples, -1)
+        
+        # Compute KL divergence: E_q[log q(z|x) - log p(z)]
+        kl = (log_q - log_p).mean(dim=0)  # Average over Monte Carlo samples
+        
+        return kl
 
     criterion = nn.MSELoss(reduction='sum')
     optimizer = optim.Adam(vae_GMM.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
@@ -409,57 +431,30 @@ def load_models():
     
     return vae_base, vae_goal, vae_gmm, train_loader, val_loader
 
-def main():
-    # Load or train all models
-    vae_base, vae_goal, vae_gmm, train_loader, val_loader = load_models()
-    
-    # Analyze latent spaces
-    print("\nAnalyzing base model latent space...")
-    latents_base, labels = analyze_latents(vae_base, val_loader)
-    plot_latent_space_2d(latents_base, labels, "Base VAE Latent Space", model_name="base")
-    
-    print("\nAnalyzing goal model latent space...")
-    latents_goal, _ = analyze_latents(vae_goal, val_loader)
-    plot_latent_space_2d(latents_goal, labels, "Goal VAE Latent Space", model_name="goal")
-    
-    print("\nAnalyzing GMM model latent space...")
-    latents_gmm, _ = analyze_latents(vae_gmm, val_loader)
-    plot_latent_space_2d(latents_gmm, labels, "GMM VAE Latent Space", model_name="gmm")
-    
-    # Visualize samples
-    print("\nGenerating samples from base model...")
-    sample_and_visualize(vae_base, model_name="base")
-    
-    print("\nGenerating samples from goal model...")
-    sample_and_visualize(vae_goal, model_name="goal")
-    
-    print("\nGenerating samples from GMM model...")
-    sample_and_visualize(vae_gmm, model_name="gmm")
-
-if __name__ == "__main__":
-    main()
-
-
 
 if __name__ == "__main__":
     print(f"Using device: {DEVICE}")
+    
+    # Ensure image path exists if saving is enabled
+    if SAVE_IMAGES:
+        ensure_image_path()
 
-    vae_Base, vae_GA, vae_GMM, train_loader = load_models()
+    vae_Base, vae_GA, vae_GMM, train_loader, val_loader = load_models()
     
     print("\nAnalyzing latent space of VAE Base...")
     base_latents, base_labels = analyze_latents(vae_Base, train_loader)
-    plot_latent_space_2d(base_latents, base_labels, title="VAE Base Latent Space")
-    sample_and_visualize(vae_Base)
+    plot_latent_space_2d(base_latents, base_labels, title="VAE Base Latent Space", model_name="base")
+    sample_and_visualize(vae_Base, model_name="base")
 
     print("\nAnalyzing latent space of VAE GA...")
     ga_latents, ga_labels = analyze_latents(vae_GA, train_loader)
-    plot_latent_space_2d(ga_latents, ga_labels, title="VAE GA Latent Space")
-    sample_and_visualize(vae_GA)
+    plot_latent_space_2d(ga_latents, ga_labels, title="VAE GA Latent Space", model_name="goal")
+    sample_and_visualize(vae_GA, model_name="goal")
     
     print("\nAnalyzing latent space of VAE GMM...")
     gmm_latents, gmm_labels = analyze_latents(vae_GMM, train_loader)
-    plot_latent_space_2d(gmm_latents, gmm_labels, title="VAE GMM Latent Space")
-    sample_and_visualize(vae_GMM)
+    plot_latent_space_2d(gmm_latents, gmm_labels, title="VAE GMM Latent Space", model_name="gmm")
+    sample_and_visualize(vae_GMM, model_name="gmm")
 
 
     '''

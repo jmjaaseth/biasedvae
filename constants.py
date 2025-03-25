@@ -10,7 +10,7 @@ INPUT_DIM = (1, 28, 28)  # MNIST image shape
 # Training hyperparameters
 BATCH_SIZE = 64  # Reduced batch size for better stability
 LEARNING_RATE = 0.0003  # Reduced learning rate
-EPOCHS = 200  # Reduced epochs since we have a simpler model
+EPOCHS = 5  # Reduced epochs since we have a simpler model
 VALIDATION_SPLIT = 0.1
 EARLY_STOPPING_PATIENCE = 10  # Increased patience
 
@@ -28,8 +28,9 @@ BASEPATH = "models/base.pth"  # Path to save/load base VAE model
 GOALPATH = "models/goal.pth"  # Path to save/load goal VAE model
 GMMPATH = "models/gmm.pth"  # Path to save/load GMM model
 
-IMAGE_PATH = "images"
-SAVE_IMAGES = True
+
+SAVE_IMAGES = True # Whether to save images to the image path
+IMAGE_PATH = "images" # Path to save images
 
 # Training control flags
 FORCE_RETRAIN_BASE = False  # Force retrain base VAE with new architecture
