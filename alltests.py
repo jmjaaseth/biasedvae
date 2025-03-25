@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.distributions import MultivariateNormal
 from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms
 from sklearn.mixture import GaussianMixture
@@ -108,7 +109,7 @@ def getModelLatents(model, dataloader):
 
     return latents, labels
 
-def analyze_latents(model, dataloader):
+def analyze_latents(model, dataloader, model_name="base"):
     model.eval()
     latents = []
     labels_list = []
@@ -122,8 +123,8 @@ def analyze_latents(model, dataloader):
     latents = np.concatenate(latents, axis=0)
     labels = np.concatenate(labels_list, axis=0)
     
-    plot_histogram(latents[:, 0], "Latent Space Distribution", "base")
-    plot_qq(latents[:, 0], "Q-Q Plot", "base")
+    plot_histogram(latents[:, 0], "Latent Space Distribution", model_name)
+    plot_qq(latents[:, 0], "Q-Q Plot", model_name)
     return latents, labels
 
 def train_base(model, train_loader, val_loader, epochs=EPOCHS):
@@ -175,7 +176,7 @@ def train_base(model, train_loader, val_loader, epochs=EPOCHS):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             model.save_model(BASEPATH)
-            print(f"New best validation loss! Patience counter: {patience_counter}")
+            print(f"New best validation loss!")
             patience_counter = 0
         else:
             patience_counter += 1
@@ -252,7 +253,7 @@ def train_goal(base_model, train_loader, val_loader, goal_latents):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             vae_GA.save_model(GOALPATH)
-            print(f"New best validation loss! Patience counter: {patience_counter}")
+            print(f"New best validation loss!")
             patience_counter = 0
         else:
             patience_counter += 1
@@ -271,17 +272,6 @@ def fit_gmm_to_latents(latents, n_components=5):
     gmm.fit(latents)
     return gmm
 
-def gmm_log_likelihood(z, gmm):
-    """Compute log likelihood of samples under the GMM prior"""
-    # Reshape z to 2D if needed (batch_size, n_samples, latent_dim) -> (batch_size * n_samples, latent_dim)
-    if len(z.shape) == 3:
-        z = z.reshape(-1, z.shape[-1])
-    
-    # Clip values to prevent overflow
-    z = np.clip(z, -1e6, 1e6)
-    # Compute log probability under the GMM prior
-    log_prob = torch.from_numpy(gmm.score_samples(z)).to(DEVICE)
-    return torch.clamp(log_prob, min=-1e6, max=1e6)  # Clip log probabilities
 
 def train_gmm_vae(base_model, train_loader, val_loader, goal_latents):
     # Check if we have valid latents
@@ -297,38 +287,30 @@ def train_gmm_vae(base_model, train_loader, val_loader, goal_latents):
     def gmm_kl_divergence(mu, logvar):
         """
         Compute KL divergence between variational posterior q(z|x) and GMM prior p(z)
-        KL(q(z|x) || p(z)) = E_q[log q(z|x) - log p(z)]
-        where p(z) is the GMM prior
         """
-        # Clip values for numerical stability
-        logvar = torch.clamp(logvar, min=-20, max=2)
-        var = torch.exp(logvar)
+        # Convert logvar to variance
+        var = logvar.exp()
         
-        # Compute Monte Carlo estimate of the KL divergence
-        n_samples = 100  # Number of Monte Carlo samples
-        z_samples = []
-        for _ in range(n_samples):
-            # Sample from q(z|x)
-            z = mu + torch.randn_like(mu) * torch.sqrt(var)
-            z_samples.append(z)
+        # Compute q(z|x), which is a normal distribution with diagonal covariance
+        q_dist = MultivariateNormal(mu, torch.diag_embed(var))
         
-        z_samples = torch.stack(z_samples)  # Shape: (n_samples, batch_size, latent_dim)
+        # Compute the log likelihood of q(z|x)
+        log_qzx = q_dist.log_prob(mu)
         
-        # Compute log q(z|x) for each sample
-        log_q = -0.5 * torch.sum(
-            logvar + (z_samples - mu).pow(2) / var + torch.log(torch.tensor(2 * np.pi, device=DEVICE)),
-            dim=-1
-        )
+        # Compute the log likelihood of p(z) (GMM prior)
+        log_pz = []
+        for pi_k, mu_k, sigma_k in zip(gmm.weights_, gmm.means_, gmm.covariances_):
+            pi_k = torch.tensor(pi_k, dtype=torch.float32, device=mu.device)
+            mu_k = torch.tensor(mu_k, dtype=torch.float32, device=mu.device)
+            sigma_k = torch.tensor(sigma_k, dtype=torch.float32, device=mu.device)
+            p_dist = MultivariateNormal(mu_k, sigma_k)
+            log_pz.append(torch.log(pi_k) + p_dist.log_prob(mu))
         
-        # Compute log p(z) using the GMM prior
-        log_p = gmm_log_likelihood(z_samples.detach().cpu().numpy(), gmm)
+        log_pz = torch.stack(log_pz, dim=-1)
+        log_pz = torch.logsumexp(log_pz, dim=-1)
         
-        # Reshape log_p to match log_q shape
-        log_p = log_p.reshape(n_samples, -1)
-        
-        # Compute KL divergence: E_q[log q(z|x) - log p(z)]
-        kl = (log_q - log_p).mean(dim=0)  # Average over Monte Carlo samples
-        
+        # Compute KL divergence
+        kl = log_qzx - log_pz
         return kl
 
     criterion = nn.MSELoss(reduction='sum')
@@ -379,7 +361,7 @@ def train_gmm_vae(base_model, train_loader, val_loader, goal_latents):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             vae_GMM.save_model(GMMPATH)
-            print(f"New best validation loss! Patience counter: {patience_counter}")
+            print(f"New best validation loss!")
             patience_counter = 0
         else:
             patience_counter += 1
@@ -429,7 +411,7 @@ def load_models():
         print("Training GMM model...")
         vae_gmm = train_gmm_vae(vae_base, train_loader, val_loader, goal_latents)
     
-    return vae_base, vae_goal, vae_gmm, train_loader, val_loader
+    return vae_base, vae_goal, vae_gmm, train_loader
 
 
 if __name__ == "__main__":
@@ -439,20 +421,20 @@ if __name__ == "__main__":
     if SAVE_IMAGES:
         ensure_image_path()
 
-    vae_Base, vae_GA, vae_GMM, train_loader, val_loader = load_models()
+    vae_Base, vae_GA, vae_GMM, train_loader = load_models()
     
     print("\nAnalyzing latent space of VAE Base...")
-    base_latents, base_labels = analyze_latents(vae_Base, train_loader)
+    base_latents, base_labels = analyze_latents(vae_Base, train_loader, "base")
     plot_latent_space_2d(base_latents, base_labels, title="VAE Base Latent Space", model_name="base")
     sample_and_visualize(vae_Base, model_name="base")
 
     print("\nAnalyzing latent space of VAE GA...")
-    ga_latents, ga_labels = analyze_latents(vae_GA, train_loader)
+    ga_latents, ga_labels = analyze_latents(vae_GA, train_loader, "goal")
     plot_latent_space_2d(ga_latents, ga_labels, title="VAE GA Latent Space", model_name="goal")
     sample_and_visualize(vae_GA, model_name="goal")
     
     print("\nAnalyzing latent space of VAE GMM...")
-    gmm_latents, gmm_labels = analyze_latents(vae_GMM, train_loader)
+    gmm_latents, gmm_labels = analyze_latents(vae_GMM, train_loader, "gmm")
     plot_latent_space_2d(gmm_latents, gmm_labels, title="VAE GMM Latent Space", model_name="gmm")
     sample_and_visualize(vae_GMM, model_name="gmm")
 

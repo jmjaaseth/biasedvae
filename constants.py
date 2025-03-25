@@ -15,9 +15,9 @@ VALIDATION_SPLIT = 0.1
 EARLY_STOPPING_PATIENCE = 10  # Increased patience
 
 # VAE-specific parameters
-BETA_BASE = .5  # Beta weight for base VAE KL divergence term
-BETA_GOAL = 0.25  # Beta weight for goal VAE KL divergence term
-BETA_GMM = 5   # Beta weight for GMM VAE KL divergence term
+BETA_BASE = .35  # Beta weight for base VAE KL divergence term
+BETA_GOAL = .75  # Beta weight for goal VAE KL divergence term
+BETA_GMM = .75   # Beta weight for GMM VAE KL divergence term
 
 # Dataset configuration
 EXPERT_GOALS = [6]  # Target numbers for shifting the latent space

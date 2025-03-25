@@ -1,6 +1,4 @@
 scikit-learn
 seaborn
 torch
-torchaudio
-torchvision
 tqdm 
