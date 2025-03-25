@@ -10,12 +10,12 @@ INPUT_DIM = (1, 28, 28)  # MNIST image shape
 # Training hyperparameters
 BATCH_SIZE = 64  # Reduced batch size for better stability
 LEARNING_RATE = 0.0003  # Reduced learning rate
-EPOCHS = 5  # Reduced epochs since we have a simpler model
+EPOCHS = 200  # Reduced epochs since we have a simpler model
 VALIDATION_SPLIT = 0.1
 EARLY_STOPPING_PATIENCE = 10  # Increased patience
 
 # VAE-specific parameters
-BETA_BASE = 1  # Beta weight for base VAE KL divergence term
+BETA_BASE = .5  # Beta weight for base VAE KL divergence term
 BETA_GOAL = 0.25  # Beta weight for goal VAE KL divergence term
 BETA_GMM = 5   # Beta weight for GMM VAE KL divergence term
 
@@ -27,7 +27,6 @@ MNIST_PATH = "data"
 BASEPATH = "models/base.pth"  # Path to save/load base VAE model
 GOALPATH = "models/goal.pth"  # Path to save/load goal VAE model
 GMMPATH = "models/gmm.pth"  # Path to save/load GMM model
-
 
 SAVE_IMAGES = True # Whether to save images to the image path
 IMAGE_PATH = "images" # Path to save images
