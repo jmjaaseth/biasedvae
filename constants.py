@@ -28,6 +28,9 @@ BASEPATH = "models/base.pth"  # Path to save/load base VAE model
 GOALPATH = "models/goal.pth"  # Path to save/load goal VAE model
 GMMPATH = "models/gmm.pth"  # Path to save/load GMM model
 
+IMAGE_PATH = "images"
+SAVE_IMAGES = True
+
 # Training control flags
 FORCE_RETRAIN_BASE = False  # Force retrain base VAE with new architecture
 FORCE_RETRAIN_GOAL = False  # Force retrain goal VAE

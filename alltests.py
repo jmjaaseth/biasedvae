@@ -122,8 +122,8 @@ def analyze_latents(model, dataloader):
     latents = np.concatenate(latents, axis=0)
     labels = np.concatenate(labels_list, axis=0)
     
-    plot_histogram(latents[:, 0], "Latent Space Distribution")
-    plot_qq(latents[:, 0], "Q-Q Plot")
+    plot_histogram(latents[:, 0], "Latent Space Distribution", "base")
+    plot_qq(latents[:, 0], "Q-Q Plot", "base")
     return latents, labels
 
 def train_base(model, train_loader, val_loader, epochs=EPOCHS):
@@ -200,8 +200,8 @@ def train_goal(base_model, train_loader, val_loader, goal_latents):
             var/var_prior + (mu - mu_prior).pow(2)/var_prior - 1 - logvar + torch.log(var_prior + 1e-8), 
             dim=1
         )
-        return torch.mean(torch.clamp(kl, min=0, max=100))
-    
+        return kl
+
     criterion = nn.MSELoss(reduction='sum')
     optimizer = optim.Adam(vae_GA.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
@@ -209,8 +209,8 @@ def train_goal(base_model, train_loader, val_loader, goal_latents):
     best_val_loss = float('inf')
     patience_counter = 0
     
-    vae_GA.train()
     for epoch in range(EPOCHS):
+        vae_GA.train()
         train_loss = 0
         recon_loss_total = 0
         kl_loss_total = 0
@@ -220,8 +220,11 @@ def train_goal(base_model, train_loader, val_loader, goal_latents):
             optimizer.zero_grad()
             recon, _, mu, logvar = vae_GA(images)
             
+            # Compute losses separately for monitoring
             recon_loss = criterion(recon, images) / images.size(0)
-            kl_loss = kl_divergence(mu, logvar)
+            kl_loss = kl_divergence(mu, logvar).mean()
+            
+            # Total loss with beta weighting
             loss = recon_loss + BETA_GOAL * kl_loss
             
             loss.backward()
@@ -236,7 +239,7 @@ def train_goal(base_model, train_loader, val_loader, goal_latents):
         recon_loss_avg = recon_loss_total / len(train_loader)
         kl_loss_avg = kl_loss_total / len(train_loader)
         
-        # Evaluate validation loss with same components
+        # Evaluate validation loss
         val_loss, val_recon_loss, val_kl_loss = evaluate_model(vae_GA, val_loader, criterion, BETA_GOAL)
         
         # Print training progress
@@ -279,53 +282,33 @@ def gmm_log_likelihood(z, gmm):
 
 def train_gmm_vae(base_model, train_loader, val_loader, goal_latents):
     # Check if we have valid latents
-    if len(goal_latents) == 0:
-        raise ValueError("No valid goal latents provided!")
+    if goal_latents is None or len(goal_latents) == 0:
+        raise ValueError("No valid latents provided for GMM VAE training")
     
-    # Clip goal latents to prevent overflow
-    goal_latents = np.clip(goal_latents, -1e6, 1e6)
-    
-    # Fit GMM to the latents
-    print("Fitting GMM to latent space...")
-    print(f"Using {len(goal_latents)} samples for GMM fitting")
-    gmm = fit_gmm_to_latents(goal_latents, n_components=GMM_N_COMPONENTS)
-    
-    # Initialize GMM VAE
     vae_GMM = Autoencoder().to(DEVICE)
     vae_GMM.load_state_dict(base_model.state_dict())
     
+    # Fit GMM to goal latents
+    gmm = fit_gmm_to_latents(goal_latents, n_components=GMM_N_COMPONENTS)
+    
     def gmm_kl_divergence(mu, logvar):
         # Clip values for numerical stability
-        mu = torch.clamp(mu, -1e6, 1e6)
-        logvar = torch.clamp(logvar, -1e6, 1e6)
+        logvar = torch.clamp(logvar, min=-20, max=2)
+        var = torch.exp(logvar)
         
-        # Sample points from the encoder distribution
-        z = vae_GMM.reparameterize(mu, logvar)
+        # Compute GMM log likelihood for each sample
+        z_samples = []
+        for _ in range(100):  # Monte Carlo samples
+            z = mu + torch.randn_like(mu) * torch.sqrt(var)
+            z_samples.append(z)
         
-        # Ensure no invalid values
-        if torch.isnan(z).any() or torch.isinf(z).any():
-            print("Warning: Invalid values in sampled latents")
-            return torch.tensor(1e3, device=DEVICE)  # Return large but finite value
+        z_samples = torch.stack(z_samples)
+        log_likelihood = gmm_log_likelihood(z_samples.cpu().numpy(), gmm)
         
-        # Compute log likelihood under GMM prior
-        log_p_z = gmm_log_likelihood(z, gmm)
-        
-        # Compute log likelihood under standard normal (encoder distribution)
-        log_2pi = 1.8378770664093453  # Precomputed log(2π) for stability
-        log_q_z = -0.5 * torch.sum(1 + logvar + log_2pi, dim=1)
-        
-        # Clip values for stability
-        log_q_z = torch.clamp(log_q_z, -1e6, 1e6)
-        
-        # Check for invalid values
-        if torch.isnan(log_p_z).any() or torch.isnan(log_q_z).any() or \
-           torch.isinf(log_p_z).any() or torch.isinf(log_q_z).any():
-            print("Warning: Invalid values in KL divergence computation")
-            return torch.tensor(1e3, device=DEVICE)  # Return large but finite value
-        
-        kl_div = (log_q_z - log_p_z).mean()
-        return torch.clamp(kl_div, -1e6, 1e6)  # Final clipping for stability
-    
+        # Compute KL divergence
+        kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - var, dim=1)
+        return kl - torch.tensor(log_likelihood, device=DEVICE)
+
     criterion = nn.MSELoss(reduction='sum')
     optimizer = optim.Adam(vae_GMM.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
@@ -333,60 +316,37 @@ def train_gmm_vae(base_model, train_loader, val_loader, goal_latents):
     best_val_loss = float('inf')
     patience_counter = 0
     
-    print("Training GMM VAE...")
-    vae_GMM.train()
     for epoch in range(EPOCHS):
+        vae_GMM.train()
         train_loss = 0
         recon_loss_total = 0
         kl_loss_total = 0
-        num_valid_batches = 0
         
         for images, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}"):
             images = images.to(DEVICE)
             optimizer.zero_grad()
             recon, _, mu, logvar = vae_GMM(images)
             
-            # Check for invalid values
-            if torch.isnan(mu).any() or torch.isnan(logvar).any() or \
-               torch.isinf(mu).any() or torch.isinf(logvar).any():
-                print("Warning: Invalid values in encoder output, skipping batch")
-                continue
-            
+            # Compute losses separately for monitoring
             recon_loss = criterion(recon, images) / images.size(0)
-            kl_loss = gmm_kl_divergence(mu, logvar)
+            kl_loss = gmm_kl_divergence(mu, logvar).mean()
             
-            # Skip batch if loss is invalid or too large
-            if torch.isinf(kl_loss) or torch.isnan(kl_loss) or kl_loss > 1e5:
-                print("Warning: Invalid or too large KL loss, skipping batch")
-                continue
-                
-            loss = recon_loss + BETA_GMM * kl_loss            
+            # Total loss with beta weighting
+            loss = recon_loss + BETA_GMM * kl_loss
             
-            # Skip if total loss is invalid
-            if torch.isinf(loss) or torch.isnan(loss):
-                print("Warning: Invalid total loss, skipping batch")
-                continue
-                
             loss.backward()
-            
-            # Clip gradients for stability
             torch.nn.utils.clip_grad_norm_(vae_GMM.parameters(), max_norm=1.0)
-            
             optimizer.step()
+            
             train_loss += loss.item()
             recon_loss_total += recon_loss.item()
             kl_loss_total += kl_loss.item()
-            num_valid_batches += 1
         
-        if num_valid_batches == 0:
-            print("Warning: No valid batches in epoch")
-            continue
-            
-        train_loss /= num_valid_batches
-        recon_loss_avg = recon_loss_total / num_valid_batches
-        kl_loss_avg = kl_loss_total / num_valid_batches
+        train_loss /= len(train_loader)
+        recon_loss_avg = recon_loss_total / len(train_loader)
+        kl_loss_avg = kl_loss_total / len(train_loader)
         
-        # Evaluate validation loss with same components
+        # Evaluate validation loss
         val_loss, val_recon_loss, val_kl_loss = evaluate_model(vae_GMM, val_loader, criterion, BETA_GMM)
         
         # Print training progress
@@ -408,46 +368,76 @@ def train_gmm_vae(base_model, train_loader, val_loader, goal_latents):
         
         scheduler.step(val_loss)
     
-    return vae_GMM, gmm
+    return vae_GMM
 
 def load_models():
     # Load data once
     train_loader, val_loader = get_mnist_loader()
     
     # Initialize models
-    vae_Base = Autoencoder().to(DEVICE)
-    vae_GA = Autoencoder().to(DEVICE)
-    vae_GMM = Autoencoder().to(DEVICE)
-
-    # Train or load base VAE
+    vae_base = Autoencoder().to(DEVICE)
+    vae_goal = Autoencoder().to(DEVICE)
+    vae_gmm = Autoencoder().to(DEVICE)
+    
+    # Load or train base model
     if os.path.exists(BASEPATH) and not FORCE_RETRAIN_BASE:
-        vae_Base.load_model(BASEPATH)
-        print("Loaded pre-trained VAE Base.")
+        print("Loading base model...")
+        vae_base.load_state_dict(torch.load(BASEPATH))
     else:
-        print("Training VAE Base...")
-        train_base(vae_Base, train_loader, val_loader)
+        print("Training base model...")
+        vae_base = train_base(vae_base, train_loader, val_loader)
     
-    # Collect latents once for both GA and GMM
-    print("Collecting latents from base model...")
-    goal_latents = collect_latents(vae_Base, train_loader)
+    # Collect latents for goal and GMM models
+    print("Collecting latents for goal and GMM models...")
+    goal_latents = collect_latents(vae_base, train_loader)
     
-    # Train or load goal-conditioned VAE
+    # Load or train goal model
     if os.path.exists(GOALPATH) and not FORCE_RETRAIN_GOAL:
-        vae_GA.load_model(GOALPATH)
-        print("Loaded pre-trained VAE GA.")
+        print("Loading goal model...")
+        vae_goal.load_state_dict(torch.load(GOALPATH))
     else:
-        print("Training VAE GA...")
-        vae_GA = train_goal(vae_Base, train_loader, val_loader, goal_latents)
+        print("Training goal model...")
+        vae_goal = train_goal(vae_base, train_loader, val_loader, goal_latents)
     
-    # Train or load GMM VAE
+    # Load or train GMM model
     if os.path.exists(GMMPATH) and not FORCE_RETRAIN_GMM:
-        vae_GMM.load_model(GMMPATH)
-        print("Loaded pre-trained VAE GMM.")
+        print("Loading GMM model...")
+        vae_gmm.load_state_dict(torch.load(GMMPATH))
     else:
-        print("Training VAE GMM...")
-        vae_GMM, gmm = train_gmm_vae(vae_Base, train_loader, val_loader, goal_latents)
+        print("Training GMM model...")
+        vae_gmm = train_gmm_vae(vae_base, train_loader, val_loader, goal_latents)
+    
+    return vae_base, vae_goal, vae_gmm, train_loader, val_loader
 
-    return vae_Base, vae_GA, vae_GMM, train_loader
+def main():
+    # Load or train all models
+    vae_base, vae_goal, vae_gmm, train_loader, val_loader = load_models()
+    
+    # Analyze latent spaces
+    print("\nAnalyzing base model latent space...")
+    latents_base, labels = analyze_latents(vae_base, val_loader)
+    plot_latent_space_2d(latents_base, labels, "Base VAE Latent Space", model_name="base")
+    
+    print("\nAnalyzing goal model latent space...")
+    latents_goal, _ = analyze_latents(vae_goal, val_loader)
+    plot_latent_space_2d(latents_goal, labels, "Goal VAE Latent Space", model_name="goal")
+    
+    print("\nAnalyzing GMM model latent space...")
+    latents_gmm, _ = analyze_latents(vae_gmm, val_loader)
+    plot_latent_space_2d(latents_gmm, labels, "GMM VAE Latent Space", model_name="gmm")
+    
+    # Visualize samples
+    print("\nGenerating samples from base model...")
+    sample_and_visualize(vae_base, model_name="base")
+    
+    print("\nGenerating samples from goal model...")
+    sample_and_visualize(vae_goal, model_name="goal")
+    
+    print("\nGenerating samples from GMM model...")
+    sample_and_visualize(vae_gmm, model_name="gmm")
+
+if __name__ == "__main__":
+    main()
 
 
 
