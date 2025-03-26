@@ -9,7 +9,6 @@ The project trains a base VAE on the MNIST dataset and explores two different me
 1. Goal VAE: Shifts the latent space towards expert-provided labels based on mean and variance of the target digit class
 2. GMM VAE: Uses a Gaussian Mixture Model approach to structure the latent space according to expert labels
 
-
 ## Loss Functions
 
 ### Base VAE Loss
@@ -42,7 +41,7 @@ $$
 \mathcal{L}_{\text{KL-GA}} = \frac{1}{2}\sum_{j=1}^d \left(\frac{\sigma_j^2}{\sigma_{p,j}^2} + \frac{(\mu_j - \mu_{p,j})^2}{\sigma_{p,j}^2} - 1 - \log(\sigma_j^2) + \log(\sigma_{p,j}^2)\right)
 $$
 
-Here, $$\mu_p$$ and $$\sigma_p^2$$ are the mean and variance of the target digit class.
+Here, $\mu_p$ and $\sigma_p^2$ are the mean and variance of the target digit class.
 
 ### GMM-Based VAE Loss
 The GMM-VAE uses a mixture of Gaussians as the prior:
@@ -59,7 +58,11 @@ $$
 
 with 
 
-$$p(z) = \sum_{k=1}^K \pi_k \mathcal{N}(z|\mu_k, \Sigma_k)$$ being the GMM prior.
+$$
+p(z) = \sum_{k=1}^K \pi_k \mathcal{N}(z|\mu_k, \Sigma_k)
+$$
+
+being the GMM prior.
 
 ## Usage
 To reproduce images found here, use:
